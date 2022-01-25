@@ -1,0 +1,392 @@
+def checkoutExternalAsset(assetType, projectPath) {
+    // Checkout external asset into Assets/External subfolder
+    def git_ref = "refs/heads/master"
+
+    def repo_parts = projectPath.split(":")
+
+    if (repo_parts.size() > 1) {
+        // Parse '/apth/to/git/repo:ref-spec'
+        git_ref = repo_parts[1]
+    }
+
+    def repo_path = repo_parts[0]
+    def repo_path_parts = repo_path.split('/')
+    def repo_name = repo_path_parts.last()
+
+    checkout([
+        $class: "GitSCM",
+        branches: [[name: "${git_ref}"]],
+        browser: [$class: "GitLab", repoUrl: "https://${GITLAB_HOST}/${repo_path}", version: env.GITLAB_VERSION],
+        extensions: [
+            [$class: "RelativeTargetDirectory", relativeTargetDir: "Assets/External/${assetType}/${repo_name}"],
+            [$class: "LocalBranch"],
+            [$class: "GitLFSPull"]
+        ],
+        userRemoteConfigs: [[
+            credentialsId: "auto-gitlab",
+            url: "git@${GITLAB_HOST}:${repo_path}.git"
+        ]]
+    ])
+}
+
+def checkoutExternalAssets(assetType, projectPaths) {
+    if (projectPaths) {
+        def repos = projectPaths.split(',')
+
+        for (int i=0; i<repos.size(); i++) {
+            checkoutExternalAsset(assetType, repos[i])
+        }
+    } else {
+        echo "INFO: Nothing to checkout"
+    }
+}
+
+pipeline {
+
+  agent {
+    node {
+      label "gpu-vulkan"
+      customWorkspace "/home/jenkins/workspace/simulator-cloud-2020.3.3f1-unityci"
+    }
+  }
+
+  options {
+    gitLabConnection("${GITLAB_HOST}")
+    skipDefaultCheckout(true)
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    timestamps()
+  }
+
+  triggers {
+    gitlab(triggerOnPush: true, triggerOnMergeRequest: true)
+  }
+
+  parameters {
+    booleanParam(name: "BUILD_WINDOWS", defaultValue: true, description: "")
+    booleanParam(name: "BUILD_LINUX", defaultValue: true, description: "")
+    booleanParam(name: "BUILD_MACOS", defaultValue: false, description: "")
+    booleanParam(name: "FORCE_CHECK", defaultValue: false, description: "")
+    booleanParam(name: "FORCE_TEST", defaultValue: false, description: "")
+    booleanParam(name: "FORCE_DEV_BUILD", defaultValue: true, description: "Enables DEVELOPMENT_BUILD")
+    booleanParam(name: "UPLOAD_TO_ECR", defaultValue: false, description: "Enable uploading docker image with build simulator zip to the ECR.")
+    string(name: "CLOUD_URL", defaultValue: "${SIMULATOR_WISE_STAGING_URL}", description: "")
+    string(name: 'WISE_AWS_ECR_ACCOUNT_ID', defaultValue: '853285614468', description: 'The AWS account ID whose ECR will be used', trim: true)
+    string(name: 'WISE_AWS_ECR_REGION', defaultValue: 'us-east-1', description: 'The AWS region where the ECR is located', trim: true)
+    credentials( name: 'WISE_AWS_ECR_CREDENTIALS_ID', required: true, defaultValue: "simulator--aws-credentials", description: 'The credentials to be used for accessing the ECR', credentialType: 'com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsImpl')
+
+    string(name: "SIMULATOR_CONTROLLABLES_REPOS", defaultValue: "HDRP/Controllables/TrafficCone,HDRP/Controllables/ChargingStation,HDRP/Controllables/TriggerZone", description: "Controllables repos to checkout")
+    string(name: "SIM_CONTROLLABLES", defaultValue: "${SIMULATOR_CONTROLLABLES}", description: "Controllables to build")
+
+    string(name: "SIMULATOR_NPC_REPOS", defaultValue: "HDRP/NPC/DefaultNPC,HDRP/VRU/Bicycles", description: "NPC Repos to checkout")
+    string(name: "SIMULATOR_NPCS", defaultValue: "all", description: "NPCs to build")
+
+    string(name: "SIMULATOR_VRU_REPOS", defaultValue: "HDRP/VRU/Scooters,HDRP/VRU/Walkers,HDRP/VRU/Animals", description: "VRU Repos to checkout")
+    string(name: "SIMULATOR_PEDESTRIANS", defaultValue: "all", description: "Pedestrians to build")
+  }
+
+  environment {
+    UNITY_USERNAME = credentials("UNITY_USERNAME")
+    UNITY_PASSWORD = credentials("UNITY_PASSWORD")
+    UNITY_SERIAL = credentials("UNITY_SERIAL")
+    UNITY_VERSION = "2020.3.3f1"
+    UNITY_DOCKER_IMAGE = "${GITLAB_HOST}:4567/hdrp/unityci/editor-lgsvl"
+    UNITY_DOCKER_IMAGE_TAG = "2020.3.3f1-v0.15-4-g07a8336__build__30"
+    CODE_SIGNING_PASSWORD = credentials("LGSVL_CODE_SIGNING_PASSWORD")
+    PYTHONUNBUFFERED = "1"
+    DISPLAY = ":0"
+    JENKINS_BUILD_ID = "${BUILD_ID}"
+    GIT_BRANCH = "${sh(script:"echo ${env.BRANCH_NAME} | sed 's#^refs/heads/##g' | tr / -  | tr [:upper:] [:lower:]", returnStdout: true).trim()}"
+    OUTPUT_SUFFIX = "${GIT_BRANCH}-${JENKINS_BUILD_ID}"
+    CODE_SIGNING_FILE = "/dev/urandom"
+    SENTRY_DSN = credentials("SIMULATOR_SENTRY_DSN")
+  }
+
+  stages {
+    stage("Git") {
+      steps {
+
+        checkout([
+          $class: "GitSCM",
+          branches: [[name: "refs/heads/${env.BRANCH_NAME}"]],
+          browser: [$class: "GitLab", repoUrl: "https://${GITLAB_HOST}/HDRP/Simulator", version: env.GITLAB_VERSION],
+          extensions: [
+            [$class: "LocalBranch"],
+            [$class: "GitLFSPull"]
+          ],
+          userRemoteConfigs: [[
+            credentialsId: "auto-gitlab",
+            url: "git@${GITLAB_HOST}:HDRP/Simulator.git"
+          ]]
+        ])
+
+        // Important note: do not wipe Library folder
+        sh label:"Cleanup the checkout", script:"""
+            git clean -xdff Assets AssetBundles Jenkins *.zip *.log
+            git reset --hard HEAD
+        """
+
+        script {
+          env.FORCE_REBUILD = "0"
+          env.GIT_COMMIT = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
+          env.SIM_ENVIRONMENTS = sh(returnStdout: true, script: "./Jenkins/get-assets.sh Assets/External/Environments ${S3_DOWNLOAD_HOST} environment 1").trim()
+          env.SIM_VEHICLES = sh(returnStdout: true, script: "./Jenkins/get-assets.sh Assets/External/Vehicles ${S3_DOWNLOAD_HOST} vehicle 1").trim()
+
+          // Disable build-in sensors
+          SIM_SENSORS = ""
+          SIM_BRIDGES = ""
+        }
+      }
+    }
+
+    stage("Prepare Assets/External settings") {
+      steps {
+        script {
+          // Reset environment variable to be set
+          // by the next conditional stage
+          env.SIM_CONTROLLABLES = ""
+          env.SIMULATOR_NPCS = ""
+          env.SIMULATOR_PEDESTRIANS = ""
+        }
+      }
+    }
+
+    stage("Checkout Assets/External") {
+      when {
+        anyOf {
+          branch "master"
+        }
+      }
+
+      steps {
+        script {
+          // Controllables
+          if (params.SIM_CONTROLLABLES != null && !params.SIM_CONTROLLABLES.isEmpty()) {
+            echo "Checkout Controllables"
+            checkoutExternalAssets("Controllables", env.SIMULATOR_CONTROLLABLES_REPOS)
+            env.SIM_CONTROLLABLES = params.SIM_CONTROLLABLES
+          }
+
+          // NPCs
+          if (params.SIMULATOR_NPCS != null && !params.SIMULATOR_NPCS.isEmpty()) {
+            echo "Checkout NPCs"
+            checkoutExternalAssets("NPCs", env.SIMULATOR_NPC_REPOS)
+            env.SIMULATOR_NPCS = params.SIMULATOR_NPCS
+          }
+
+          // Pedestrians
+          if (params.SIMULATOR_PEDESTRIANS != null && !params.SIMULATOR_PEDESTRIANS.isEmpty()) {
+            echo "Checkout Pedestrians (Pedestrians/Animals/Scooters/Etc"
+            checkoutExternalAssets("Pedestrians", env.SIMULATOR_VRU_REPOS)
+            env.SIMULATOR_PEDESTRIANS = params.SIMULATOR_PEDESTRIANS
+          }
+        }
+      }
+    }
+
+    stage("Build environment info") {
+      steps {
+          sh script: "find Assets/External -mindepth 2 -maxdepth 3 -type d -name '.git' | sed 's|\\/\\.git\$||' || echo 'W: Nothing found'", label: "Git clones"
+          sh script:"find Assets/External -mindepth 2 -maxdepth 3 -type d | grep -E -v 'git|tmp'  || echo 'W: Nothing found'", label: "Assets"
+          sh label:"SIMULATOR env vars", script:"printenv | grep -E 'SIMULATOR|^SIM_' | grep -v -E '_RELEASE|_ALL|_ENVIRONMENTS|_SENSORS' | sort"
+      }
+    }
+
+    stage("Docker") {
+      environment {
+        DOCKERHUB_DOCKER_REGISTRY = credentials("dockerhub-docker-registry")
+        AUTO_GITLAB_DOCKER_REGISTRY = credentials("auto-gitlab-docker-registry")
+      }
+      steps {
+        dir("Jenkins") {
+          sh """
+            docker login -u "${DOCKERHUB_DOCKER_REGISTRY_USR}" -p "${DOCKERHUB_DOCKER_REGISTRY_PSW}"
+            docker login -u "${AUTO_GITLAB_DOCKER_REGISTRY_USR}" -p "${AUTO_GITLAB_DOCKER_REGISTRY_PSW}" ${GITLAB_HOST}:4567
+            docker-compose build \
+                --build-arg UNITY_VERSION="${UNITY_VERSION}" \
+                --build-arg EDITOR_DOCKER_IMAGE="${UNITY_DOCKER_IMAGE}:${UNITY_DOCKER_IMAGE_TAG}" \
+                --build-arg IMAGE_TAG="${UNITY_DOCKER_IMAGE_TAG}-simulator" \
+                build-simulator
+            docker-compose push build-simulator
+          """
+        }
+      }
+    }
+
+    stage("Check") {
+      when {
+        anyOf {
+            buildingTag()
+            branch 'master'
+            environment name: "FORCE_CHECK", value: "true"
+        }
+      }
+      steps {
+        dir("Jenkins") {
+          sh "UID=`id -u` docker-compose run --rm build-simulator check"
+        }
+      }
+      post {
+        success {
+          archiveArtifacts "*-check-${OUTPUT_SUFFIX}.html"
+        }
+      }
+    }
+
+    stage("Test") {
+      when {
+        anyOf {
+            buildingTag()
+            branch 'master'
+            environment name: "FORCE_TEST", value: "true"
+        }
+      }
+      steps {
+        dir("Jenkins") {
+          sh "UID=`id -u` docker-compose run --rm build-simulator test"
+        }
+      }
+      post {
+        success {
+          xunit([NUnit3(pattern: "*-test-${OUTPUT_SUFFIX}.xml", deleteOutputFiles: true)])
+        }
+      }
+    }
+
+    stage("Windows") {
+      when {
+        environment name: "BUILD_WINDOWS", value: "true"
+      }
+
+      steps {
+        dir("Jenkins") {
+          withCredentials([file(credentialsId: "LGSVL_CODE_SIGNING_FILE", variable: "CODE_SIGNING_FILE")]) {
+            sh "UID=`id -u` docker-compose run --rm build-simulator windows"
+          }
+        }
+      }
+
+      post {
+        success {
+          archiveArtifacts "*-windows64-${OUTPUT_SUFFIX}.zip"
+        }
+      }
+
+    } // Windows
+
+    stage("Linux") {
+      when {
+        environment name: "BUILD_LINUX", value: "true"
+      }
+
+      steps {
+        dir("Jenkins") {
+          sh "UID=`id -u` docker-compose run --rm build-simulator linux"
+        }
+      }
+
+      post {
+        success {
+          archiveArtifacts "*-linux64-${OUTPUT_SUFFIX}.zip"
+        }
+      }
+
+    } // Linux
+
+    stage("macOS") {
+      when {
+        environment name: "BUILD_MACOS", value: "true"
+      }
+
+      steps {
+        dir("Jenkins") {
+          sh "UID=`id -u` docker-compose run --rm build-simulator macos"
+        }
+      }
+
+      post {
+        success {
+          archiveArtifacts "*-macOS-${OUTPUT_SUFFIX}.zip"
+        }
+      }
+
+    } // macOS
+
+    stage("uploadECR") {
+      when {
+        anyOf {
+            buildingTag()
+            branch 'master'
+            environment name: "UPLOAD_TO_ECR", value: "true"
+        }
+      }
+
+      steps {
+        dir("Jenkins") {
+          sh "echo Using credentials ${WISE_AWS_ECR_CREDENTIALS_ID}"
+          withCredentials([[credentialsId: "${WISE_AWS_ECR_CREDENTIALS_ID}", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', $class: 'AmazonWebServicesCredentialsBinding']]) {
+            sh """
+              DOCKER_REGISTRY="${WISE_AWS_ECR_ACCOUNT_ID}.dkr.ecr.${WISE_AWS_ECR_REGION}.amazonaws.com"
+              if [ "${GIT_BRANCH}" = "master" ]; then
+                  DOCKER_REPO="wise/simulator"
+              else
+                  DOCKER_REPO="wise/simulator/${GIT_BRANCH}"
+              fi
+              DOCKER_TAG="build__${JENKINS_BUILD_ID}"
+
+              docker-compose pull aws-cli
+              if ! UID=`id -u` docker-compose run --rm aws-cli ecr get-login-password --region $WISE_AWS_ECR_REGION | docker login --username AWS --password-stdin \$DOCKER_REGISTRY; then
+                echo "ABORT: bad AWS credentials?"
+                exit 1
+              fi
+              if ! UID=`id -u` docker-compose run --rm aws-cli ecr create-repository --repository-name \$DOCKER_REPO --region $WISE_AWS_ECR_REGION; then
+                echo "INFO: aws-cli ecr create-repository --repository-name \$DOCKER_REPO --region $WISE_AWS_ECR_REGION failed - assuming that it's because the repo already exists in ECR"
+              fi
+
+              cd ../Docker
+              cp -al ../*-linux64-${OUTPUT_SUFFIX}.zip .
+              docker build --pull --no-cache \
+                  --build-arg "simulator_zipfile=*-linux64-${OUTPUT_SUFFIX}.zip" \
+                  --build-arg image_git_describe=\$(git describe --always --tags) \
+                  --build-arg image_uuidgen=\$(uuidgen) \
+                  -t \$DOCKER_REGISTRY/\$DOCKER_REPO:\$DOCKER_TAG .
+              docker push \$DOCKER_REGISTRY/\$DOCKER_REPO:\$DOCKER_TAG
+              rm -fv *-linux64-${OUTPUT_SUFFIX}.zip
+
+              docker image rm \
+                \$DOCKER_REGISTRY/\$DOCKER_REPO:\$DOCKER_TAG
+              docker container prune -f
+              docker volume prune -f
+              docker image prune -f
+            """
+          }
+        }
+      }
+    } // uploadECR
+  } // stages
+
+  post {
+    failure {
+      updateGitlabCommitStatus state: "failed"
+
+      script {
+        emailext subject: '$DEFAULT_SUBJECT',
+                 body: '$DEFAULT_CONTENT',
+                 recipientProviders: [
+                    [$class: 'CulpritsRecipientProvider'],
+                    [$class: 'DevelopersRecipientProvider'],
+                    [$class: 'RequesterRecipientProvider']
+                 ],
+                 replyTo: '$DEFAULT_REPLYTO',
+                 to: '$DEFAULT_RECIPIENTS'
+      }
+    }
+    success {
+      updateGitlabCommitStatus state: "success"
+    }
+    always {
+        sh script:"zip logs-${env.OUTPUT_SUFFIX}.zip *.log || true", label:"Archive log files"
+        archiveArtifacts artifacts:"logs*.zip", allowEmptyArchive:true
+    }
+  }
+
+}

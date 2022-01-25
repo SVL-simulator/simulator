@@ -1,0 +1,427 @@
+//
+
+pipeline {
+
+  agent {
+    node {
+      label "gpu-vulkan"
+      customWorkspace "/home/jenkins/workspace/simulator-cloud-bundles-2020.3.3f1-unityci"
+    }
+  }
+
+  options {
+    gitLabConnection("${GITLAB_HOST}")
+    skipDefaultCheckout(true)
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    timestamps()
+  }
+
+  triggers {
+    gitlab(triggerOnPush: true, triggerOnMergeRequest: true, branchFilterType: "NameBasedFilter", includeBranchesSpec: "master", excludeBranchesSpec: "")
+  }
+
+  parameters {
+    booleanParam(name: "FORCE_REBUILD", defaultValue: false, description: "")
+    booleanParam(name: "UPLOAD_TO_S3", defaultValue: true, description: "Upload bundles to S3")
+    booleanParam(name: "UPLOAD_TO_WISE", defaultValue: false, description: "Enable uploading assets to Wise.")
+    string(name: "BUILD_SIMULATOR_ENVIRONMENTS", defaultValue: "${SIMULATOR_ENVIRONMENTS}", description: "Environments to build")
+    string(name: "BUILD_SIMULATOR_VEHICLES", defaultValue: "${SIMULATOR_VEHICLES}", description: "Vehicles to build")
+    string(name: "BUILD_SIMULATOR_SENSORS", defaultValue: "${SIMULATOR_SENSORS}", description: "Sensors to build")
+    string(name: "BUILD_SIMULATOR_BRIDGES", defaultValue: "${SIMULATOR_BRIDGES}", description: "Bridges to build")
+    string(name: "WISE_URL", defaultValue: "${SIMULATOR_WISE_DEV_URL}", description: "Url to use with wise-cli for uploading assets, CLOUD_URL should be used later, not it's separate to test against dev instead of staging")
+    credentials(name: "WISE_CONTENT_UPLOAD_CREDENTIALS_ID", required: true, defaultValue: "WISE_CONTENT_UPLOAD_DEV", description: 'The credentials to be used for uploading asset bundles', credentialType: 'com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+    credentials( name: 'S3_CREDENTIALS_ID', required: true, defaultValue: "s3--aws-credentials", description: 'The credentials to be used for uploading to S3 bucket', credentialType: 'com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsImpl')
+  }
+
+  environment {
+    UNITY_USERNAME = credentials("UNITY_USERNAME")
+    UNITY_PASSWORD = credentials("UNITY_PASSWORD")
+    UNITY_SERIAL = credentials("UNITY_SERIAL")
+    UNITY_VERSION = "2020.3.3f1"
+    UNITY_DOCKER_IMAGE = "${GITLAB_HOST}:4567/hdrp/unityci/editor-lgsvl"
+    UNITY_DOCKER_IMAGE_TAG = "2020.3.3f1-v0.15-4-g07a8336__build__30"
+    PYTHONUNBUFFERED = "1"
+    DISPLAY = ":0"
+    JENKINS_BUILD_ID = "${BUILD_ID}"
+    S3_DOWNLOAD_HOST = "${S3_DOWNLOAD_HOST}/v2"
+  }
+
+  stages {
+    stage("Checkout Simulator") {
+        steps {
+            checkout scm
+            sh """
+                git lfs install
+                git lfs pull origin
+            """
+
+            script {
+                env.GIT_COMMIT = sh(returnStdout: true, script: "git rev-parse HEAD").trim()
+            }
+
+            // Important note: do not wipe Library folder
+            sh label:"Cleanup the checkout", script:"""
+                git clean -xdff Assets AssetBundles Jenkins *.zip *.log
+                git reset --hard HEAD
+            """
+        }
+    }
+
+    stage("Checkout Environments") {
+      steps {
+        script {
+          def repo_list = env.BUILD_SIMULATOR_ENVIRONMENTS
+          def repo_prefix = "Environments"
+
+          if (repo_list) {
+            def repos = repo_list.split(',')
+            def repo_names_list = []
+
+            for (int i=0; i<repos.size(); i++) {
+              def repo_parts = repos[i].split(":")
+
+              def repo_git_ref = "refs/heads/master"
+              if (repo_parts.size() > 1) {
+                  repo_git_ref = repo_parts[1]
+              }
+
+              def repo_path = repo_parts[0]
+              def repo_path_parts = repo_path.split('/')
+              def repo_name = repo_path_parts.last()
+
+              repo_names_list.add(repo_name)
+              echo "INFO: Checking out ${repo_prefix}: ${repo_name} ref ${repo_git_ref} from HDRP/${repo_prefix}/${repo_path} to .external-assets/${repo_prefix}/${repo_name}"
+
+              checkout([
+                $class: "GitSCM",
+                branches: [[name: "${repo_git_ref}"]],
+                browser: [$class: "GitLab", repoUrl: "https://${GITLAB_HOST}/HDRP/${repo_prefix}/${repo_path}", version: env.GITLAB_VERSION],
+                extensions: [
+                  [$class: "RelativeTargetDirectory", relativeTargetDir: ".external-assets/${repo_prefix}/${repo_name}"],
+                  [$class: "LocalBranch"],
+                  [$class: "GitLFSPull"]
+                ],
+                userRemoteConfigs: [[
+                  credentialsId: "auto-gitlab",
+                  url: "git@${GITLAB_HOST}:HDRP/${repo_prefix}/${repo_path}.git"
+                ]]
+              ])
+            }
+            def repo_names = repo_names_list.join(",")
+            echo "INFO: Checked out following ${repo_prefix}: ${repo_names}"
+            env.SIM_ENVIRONMENTS = sh(returnStdout: true, script: "./Jenkins/get-assets.sh .external-assets/${repo_prefix} ${S3_DOWNLOAD_HOST} environment 0 ${repo_names}").trim()
+          } else {
+            echo "INFO: No ${repo_prefix} to checkout"
+            env.SIM_ENVIRONMENTS = ""
+          }
+        }
+        sh "printenv SIM_ENVIRONMENTS | tee environments.txt"
+      }
+      post {
+        success {
+            archiveArtifacts "environments.txt"
+        }
+      }
+    }
+
+    stage("Checkout Vehicles") {
+      steps {
+        script {
+          def repo_list = env.BUILD_SIMULATOR_VEHICLES
+          def repo_prefix = "Vehicles"
+
+          if (repo_list) {
+            def repos = repo_list.split(',')
+            def repo_names_list = []
+
+            for (int i=0; i<repos.size(); i++) {
+              def repo_parts = repos[i].split(":")
+
+              def repo_git_ref = "refs/heads/master"
+              if (repo_parts.size() > 1) {
+                  repo_git_ref = repo_parts[1]
+              }
+
+              def repo_path = repo_parts[0]
+              def repo_path_parts = repo_path.split('/')
+              def repo_name = repo_path_parts.last()
+
+              repo_names_list.add(repo_name)
+              echo "INFO: Checking out ${repo_prefix}: ${repo_name} ref ${repo_git_ref} from HDRP/${repo_prefix}/${repo_path} to .external-assets/${repo_prefix}/${repo_name}"
+
+              checkout([
+                $class: "GitSCM",
+                branches: [[name: "${repo_git_ref}"]],
+                browser: [$class: "GitLab", repoUrl: "https://${GITLAB_HOST}/HDRP/${repo_prefix}/${repo_path}", version: env.GITLAB_VERSION],
+                extensions: [
+                  [$class: "RelativeTargetDirectory", relativeTargetDir: ".external-assets/${repo_prefix}/${repo_name}"],
+                  [$class: "LocalBranch"],
+                  [$class: "GitLFSPull"]
+                ],
+                userRemoteConfigs: [[
+                  credentialsId: "auto-gitlab",
+                  url: "git@${GITLAB_HOST}:HDRP/${repo_prefix}/${repo_path}.git"
+                ]]
+              ])
+            }
+            def repo_names = repo_names_list.join(",")
+            echo "INFO: Checked out following ${repo_prefix}: ${repo_names}"
+            env.SIM_VEHICLES = sh(returnStdout: true, script: "./Jenkins/get-assets.sh .external-assets/${repo_prefix} ${S3_DOWNLOAD_HOST} vehicle 0 ${repo_names}").trim()
+          } else {
+            echo "INFO: No ${repo_prefix} to checkout"
+            env.SIM_VEHICLES = ""
+          }
+        }
+        sh "printenv SIM_VEHICLES | tee vehicles.txt"
+      }
+      post {
+        success {
+            archiveArtifacts "vehicles.txt"
+        }
+      }
+    }
+
+    stage("Checkout Sensors") {
+      steps {
+        script {
+          def repo_list = env.BUILD_SIMULATOR_SENSORS
+          def repo_prefix = "Sensors"
+
+          if (repo_list) {
+            def repos = repo_list.split(',')
+            def repo_names_list = []
+
+            for (int i=0; i<repos.size(); i++) {
+              def repo_parts = repos[i].split(":")
+
+              def repo_git_ref = "refs/heads/master"
+              if (repo_parts.size() > 1) {
+                  repo_git_ref = repo_parts[1]
+              }
+
+              def repo_path = repo_parts[0]
+              def repo_path_parts = repo_path.split('/')
+              def repo_name = repo_path_parts.last()
+
+              repo_names_list.add(repo_name)
+              echo "INFO: Checking out ${repo_prefix}: ${repo_name} ref ${repo_git_ref} from HDRP/${repo_prefix}/${repo_path} to .external-assets/${repo_prefix}/${repo_name}"
+
+              checkout([
+                $class: "GitSCM",
+                branches: [[name: "${repo_git_ref}"]],
+                browser: [$class: "GitLab", repoUrl: "https://${GITLAB_HOST}/HDRP/${repo_prefix}/${repo_path}", version: env.GITLAB_VERSION],
+                extensions: [
+                  [$class: "RelativeTargetDirectory", relativeTargetDir: ".external-assets/${repo_prefix}/${repo_name}"],
+                  [$class: "LocalBranch"],
+                  [$class: "GitLFSPull"]
+                ],
+                userRemoteConfigs: [[
+                  credentialsId: "auto-gitlab",
+                  url: "git@${GITLAB_HOST}:HDRP/${repo_prefix}/${repo_path}.git"
+                ]]
+              ])
+            }
+            def repo_names = repo_names_list.join(",")
+            echo "INFO: Checked out following ${repo_prefix}: ${repo_names}"
+            env.SIM_SENSORS = sh(returnStdout: true, script: "./Jenkins/get-assets.sh .external-assets/${repo_prefix} ${S3_DOWNLOAD_HOST} sensor 0 ${repo_names}").trim()
+          } else {
+            echo "INFO: No ${repo_prefix} to checkout"
+            env.SIM_SENSORS = ""
+          }
+        }
+        sh "printenv SIM_SENSORS | tee sensors.txt"
+      }
+      post {
+        success {
+            archiveArtifacts "sensors.txt"
+        }
+      }
+    }
+
+    stage("Checkout Bridges") {
+      steps {
+        script {
+          def repo_list = env.BUILD_SIMULATOR_BRIDGES
+          def repo_prefix = "Bridges"
+
+          if (repo_list) {
+            def repos = repo_list.split(',')
+            def repo_names_list = []
+
+            for (int i=0; i<repos.size(); i++) {
+              def repo_parts = repos[i].split(":")
+
+              def repo_git_ref = "refs/heads/master"
+              if (repo_parts.size() > 1) {
+                  repo_git_ref = repo_parts[1]
+              }
+
+              def repo_path = repo_parts[0]
+              def repo_path_parts = repo_path.split('/')
+              def repo_name = repo_path_parts.last()
+
+              repo_names_list.add(repo_name)
+              echo "INFO: Checking out ${repo_prefix}: ${repo_name} ref ${repo_git_ref} from HDRP/${repo_prefix}/${repo_path} to .external-assets/${repo_prefix}/${repo_name}"
+
+              checkout([
+                $class: "GitSCM",
+                branches: [[name: "${repo_git_ref}"]],
+                browser: [$class: "GitLab", repoUrl: "https://${GITLAB_HOST}/HDRP/${repo_prefix}/${repo_path}", version: env.GITLAB_VERSION],
+                extensions: [
+                  [$class: "RelativeTargetDirectory", relativeTargetDir: ".external-assets/${repo_prefix}/${repo_name}"],
+                  [$class: "LocalBranch"],
+                  [$class: "GitLFSPull"]
+                ],
+                userRemoteConfigs: [[
+                  credentialsId: "auto-gitlab",
+                  url: "git@${GITLAB_HOST}:HDRP/${repo_prefix}/${repo_path}.git"
+                ]]
+              ])
+            }
+            def repo_names = repo_names_list.join(",")
+            echo "INFO: Checked out following ${repo_prefix}: ${repo_names}"
+            env.SIM_BRIDGES = sh(returnStdout: true, script: "./Jenkins/get-assets.sh .external-assets/${repo_prefix} ${S3_DOWNLOAD_HOST} bridge 0 ${repo_names}").trim()
+          } else {
+            echo "INFO: No ${repo_prefix} to checkout"
+            env.SIM_BRIDGES = ""
+          }
+        }
+        sh "printenv SIM_BRIDGES | tee bridges.txt"
+      }
+      post {
+        success {
+            archiveArtifacts "bridges.txt"
+        }
+      }
+    }
+
+    stage("Docker") {
+      environment {
+        DOCKERHUB_DOCKER_REGISTRY = credentials("dockerhub-docker-registry")
+        AUTO_GITLAB_DOCKER_REGISTRY = credentials("auto-gitlab-docker-registry")
+      }
+      steps {
+        dir("Jenkins") {
+          sh """
+            docker login -u "${DOCKERHUB_DOCKER_REGISTRY_USR}" -p "${DOCKERHUB_DOCKER_REGISTRY_PSW}"
+            docker login -u "${AUTO_GITLAB_DOCKER_REGISTRY_USR}" -p "${AUTO_GITLAB_DOCKER_REGISTRY_PSW}" ${GITLAB_HOST}:4567
+            docker-compose build \
+                --build-arg UNITY_VERSION="${UNITY_VERSION}" \
+                --build-arg EDITOR_DOCKER_IMAGE="${UNITY_DOCKER_IMAGE}:${UNITY_DOCKER_IMAGE_TAG}" \
+                --build-arg IMAGE_TAG="${UNITY_DOCKER_IMAGE_TAG}-simulator" \
+                build-simulator
+            docker-compose push build-simulator
+          """
+        }
+      }
+    }
+
+    stage("Build") {
+      when {
+        anyOf {
+          not {
+            environment name: "SIM_ENVIRONMENTS", value: ""
+          }
+          not {
+            environment name: "SIM_VEHICLES", value: ""
+          }
+          not {
+            environment name: "SIM_SENSORS", value: ""
+          }
+          not {
+            environment name: "SIM_BRIDGES", value: ""
+          }
+        }
+      }
+      steps {
+        dir("Jenkins") {
+          sh "UID=`id -u` docker-compose run --rm build-bundles"
+        }
+      }
+    } // Build
+
+    stage("Upload-S3") {
+      when {
+        environment name: "UPLOAD_TO_S3", value: "true"
+        anyOf {
+          not {
+            environment name: "SIM_ENVIRONMENTS", value: ""
+          }
+          not {
+            environment name: "SIM_VEHICLES", value: ""
+          }
+          not {
+            environment name: "SIM_SENSORS", value: ""
+          }
+          not {
+            environment name: "SIM_BRIDGES", value: ""
+          }
+        }
+      }
+      steps {
+        withCredentials([[credentialsId: "${S3_CREDENTIALS_ID}", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', $class: 'AmazonWebServicesCredentialsBinding']]) {
+          dir("Jenkins") {
+            sh """
+              UID=`id -u` S3_BUCKET_ACL="--acl public-read" docker-compose run --rm upload-bundles | tee ../upload-bundles.log
+              # exit PIPESTATUS[0] cannot be used because of:
+              # groovy.lang.MissingPropertyException: No such property: PIPESTATUS for class: groovy.lang.Binding
+              exit `grep ^upload.failed: ../upload-bundles.log | wc -l`
+            """
+          }
+        }
+      }
+    } // Upload
+
+    stage("Upload-Wise") {
+      when {
+        environment name: "UPLOAD_TO_WISE", value: "true"
+        anyOf {
+          not {
+            environment name: "SIM_ENVIRONMENTS", value: ""
+          }
+          not {
+            environment name: "SIM_VEHICLES", value: ""
+          }
+          not {
+            environment name: "SIM_SENSORS", value: ""
+          }
+          not {
+            environment name: "SIM_BRIDGES", value: ""
+          }
+        }
+      }
+      steps {
+        withCredentials([usernamePassword(credentialsId: '${WISE_CONTENT_UPLOAD_CREDENTIALS_ID}',
+                                          usernameVariable: 'WISE_USERNAME',
+                                          passwordVariable: 'WISE_PASSWORD')
+                        ])
+        {
+          dir("Jenkins") {
+            sh """
+              docker-compose pull upload-bundles-wise
+              UID=`id -u` docker-compose run --rm upload-bundles-wise | tee ../upload-bundles-wise.log
+              # exit PIPESTATUS[0] cannot be used because of:
+              # groovy.lang.MissingPropertyException: No such property: PIPESTATUS for class: groovy.lang.Binding
+              exit `grep ^ERROR: ../upload-bundles-wise.log | wc -l`
+            """
+          }
+        }
+      }
+    } // Upload-Wise
+
+  } // stages
+
+  post {
+    failure {
+      updateGitlabCommitStatus state: "failed"
+    }
+    success {
+      updateGitlabCommitStatus state: "success"
+    }
+    always {
+        sh script:"zip logs-bundles-${BUILD_ID}.zip *.log || true", label:"Archive log files"
+        archiveArtifacts artifacts:"logs*.zip", allowEmptyArchive:true
+    }
+  }
+
+}

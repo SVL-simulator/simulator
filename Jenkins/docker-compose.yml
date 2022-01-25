@@ -1,0 +1,109 @@
+version: "2.4"
+
+services:
+  build-simulator:
+    build: .
+    image: ${UNITY_DOCKER_IMAGE}:${UNITY_DOCKER_IMAGE_TAG}-simulator
+    user: ${UID}
+    environment:
+      - S3_DOWNLOAD_HOST
+      - SIM_ENVIRONMENTS
+      - SIM_VEHICLES
+      - SIM_CONTROLLABLES
+      - SIM_SENSORS
+      - SIM_BRIDGES
+      - SIMULATOR_NPCS
+      - SIMULATOR_PEDESTRIANS
+      - CLOUD_URL
+      - JENKINS_BUILD_ID
+      - GIT_COMMIT
+      - GIT_BRANCH
+      - GIT_TAG
+      - FORCE_DEV_BUILD
+      - SENTRY_DSN
+      - UNITY_USERNAME
+      - UNITY_PASSWORD
+      - UNITY_SERIAL
+      - UNITY_VERSION
+      - CODE_SIGNING_PASSWORD
+      - DISPLAY
+      - XAUTHORITY=/tmp/.Xauthority
+    volumes:
+      - ..:/mnt
+      - /etc/localtime:/etc/localtime:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${HOME}/.Xauthority:/tmp/.Xauthority
+      - ${CODE_SIGNING_FILE}:/tmp/signing.p12
+    runtime: "nvidia"
+    privileged: true
+    entrypoint: "/mnt/Jenkins/build-simulator.sh"
+
+  build-bundles:
+    build: .
+    image: ${UNITY_DOCKER_IMAGE}:${UNITY_DOCKER_IMAGE_TAG}-simulator
+    user: ${UID}
+    environment:
+      - SIM_ENVIRONMENTS
+      - SIM_VEHICLES
+      - SIM_SENSORS
+      - SIM_BRIDGES
+      - JENKINS_BUILD_ID
+      - GIT_COMMIT
+      - GIT_BRANCH
+      - GIT_TAG
+      - UNITY_USERNAME
+      - UNITY_PASSWORD
+      - UNITY_SERIAL
+      - UNITY_VERSION
+      - DISPLAY
+      - XAUTHORITY=/tmp/.Xauthority
+    volumes:
+      - ..:/mnt
+      - /etc/localtime:/etc/localtime:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${HOME}/.Xauthority:/tmp/.Xauthority
+    runtime: "nvidia"
+    privileged: true
+    entrypoint: "/mnt/Jenkins/build-bundles.sh"
+
+  upload-bundles:
+    image: amazon/aws-cli:2.2.20
+    user: ${UID}
+    environment:
+      - SIM_ENVIRONMENTS
+      - SIM_VEHICLES
+      - SIM_SENSORS
+      - SIM_BRIDGES
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - S3_BUCKET_NAME
+      - S3_BUCKET_ACL
+      - GIT_COMMIT
+    volumes:
+      - ..:/mnt
+      - /etc/localtime:/etc/localtime:ro
+    entrypoint: "/mnt/Jenkins/upload-bundles.sh"
+
+  upload-bundles-wise:
+    image: auto-gitlab.lgsvl.net:4567/hdrp/wise-cli
+    user: ${UID}
+    environment:
+      - SIM_ENVIRONMENTS
+      - SIM_VEHICLES
+      - SIM_SENSORS
+      - SIM_BRIDGES
+      - WISE_USERNAME
+      - WISE_PASSWORD
+      - WISE_URL
+      - HOME=/tmp
+    volumes:
+      - ..:/mnt
+      - /etc/localtime:/etc/localtime:ro
+    entrypoint: "/mnt/Jenkins/upload-bundles-wise.sh"
+
+  aws-cli:
+    image: amazon/aws-cli:2.2.20
+    user: ${UID}
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY

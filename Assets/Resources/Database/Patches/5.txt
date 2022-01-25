@@ -1,0 +1,33 @@
+PRAGMA foreign_keys = off;
+
+BEGIN TRANSACTION;
+
+DROP TABLE sessions;
+DROP TABLE users;
+DROP TABLE maps;
+DROP TABLE vehicles;
+DROP TABLE clusters;
+DROP TABLE connections;
+
+DROP TABLE IF EXISTS assets;
+CREATE TABLE assets (
+	assetGuid VARCHAR(512) NOT NULL PRIMARY KEY,
+	type VARCHAR(256) NOT NULL,
+	localPath VARCHAR(4096) NOT NULL
+);
+
+DROP TABLE IF EXISTS clientSettings;
+CREATE TABLE clientSettings (
+	simid VARCHAR(512) NOT NULL PRIMARY KEY,
+	onlineStatus BOOLEAN NOT NULL
+);
+
+DROP TABLE IF EXISTS simulations;
+CREATE TABLE simulations (
+	simid VARCHAR (512) NOT NULL PRIMARY KEY,
+	simData TEXT NOT NULL
+);
+
+COMMIT;
+
+PRAGMA foreign_keys=on;

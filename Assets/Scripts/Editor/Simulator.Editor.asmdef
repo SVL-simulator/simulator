@@ -1,0 +1,29 @@
+{
+    "name": "Simulator.Editor",
+    "rootNamespace": "",
+    "references": [
+        "Simulator",
+        "Simulator.Plugins",
+        "Simulator.Bridge",
+        "Simulator.Bridge.Cyber",
+        "Unity.Mathematics",
+        "Simulator.Network.Core",
+        "Unity.RenderPipelines.HighDefinition.Editor",
+        "Unity.RenderPipelines.Core.Editor",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.Formats.Fbx.Editor",
+        "Unity.RenderPipelines.HighDefinition.Runtime",
+        "Unity.EditorCoroutines.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

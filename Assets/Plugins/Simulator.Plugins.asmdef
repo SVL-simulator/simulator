@@ -1,0 +1,14 @@
+{
+    "name": "Simulator.Plugins",
+    "references": [
+        "Unity.RenderPipelines.HighDefinition.Runtime"
+    ],
+    "optionalUnityReferences": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": []
+}
